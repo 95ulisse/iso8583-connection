@@ -1193,6 +1193,109 @@ func TestClient_Options(t *testing.T) {
 
 		require.Equal(t, 1, callsCounter)
 	})
+
+	t.Run("graceful shutdown with WaitForInboundMessageHandlers", func(t *testing.T) {
+		// This test is a bit tricky, because we want to test that we can properly shutdown
+		// the connection when there are inbound messages being processed.
+		//
+		// To achieve that, we:
+		// 1. Write a few messages to the server without using Send, so that the reply will be handled by the InboundMessageHandler.
+		// 2. Wait for all handlers to have been started but not finished.
+		// 3. Close the connection, which triggers a call to WaitForInboundMessageHandlers.
+		// 4. Check that no handler was skipped and fully ran to completion.
+
+		const messagesCount = 50
+		activeInboundMessageHandlersCount := atomic.Int32{}
+		inboundMessageHandlersBarrier := make(chan struct{})
+
+		server, err := NewTestServer()
+		require.NoError(t, err)
+		defer server.Close()
+
+		onClose := func(c *connection.Connection) error {
+			// Allow all handlers to continue and wait for them to finish
+			close(inboundMessageHandlersBarrier)
+			c.WaitForInboundMessageHandlers()
+
+			return nil
+		}
+
+		onInboundMessage := func(c *connection.Connection, m *iso8583.Message) {
+			activeInboundMessageHandlersCount.Add(1)
+			defer activeInboundMessageHandlersCount.Add(-1)
+
+			// Synchronize with the main goroutine and all the other handlers
+			<-inboundMessageHandlersBarrier
+
+			// Now the connection has begun closing.
+			// Send a message to the server and wait for the reply, to ensure we can still read and write to the underlying socket.
+
+			message := iso8583.NewMessage(testSpec)
+			err = message.Marshal(baseFields{
+				MTI:          field.NewStringValue("0800"),
+				TestCaseCode: field.NewStringValue(TestCaseReply),
+				STAN:         field.NewStringValue(getSTAN()),
+			})
+			require.NoError(t, err)
+
+			response, err := c.Send(message)
+			require.NoError(t, err)
+
+			mti, err := response.GetMTI()
+			require.NoError(t, err)
+			require.Equal(t, "0810", mti)
+		}
+
+		c, err := connection.New(server.Addr, testSpec, readMessageLength, writeMessageLength,
+			connection.SendTimeout(500*time.Millisecond),
+			connection.OnClose(onClose),
+			connection.InboundMessageHandler(onInboundMessage),
+		)
+		require.NoError(t, err)
+
+		err = c.Connect()
+		require.NoError(t, err)
+
+		// Write a few messages to the server without using Send, so that the reply will be handled by the InboundMessageHandler
+		for range messagesCount {
+			message := iso8583.NewMessage(testSpec)
+			err = message.Marshal(baseFields{
+				MTI:          field.NewStringValue("0800"),
+				TestCaseCode: field.NewStringValue(TestCaseReply),
+				STAN:         field.NewStringValue(getSTAN()),
+			})
+			require.NoError(t, err)
+
+			packed, err := message.Pack()
+			require.NoError(t, err)
+
+			// prepare header
+			header := &bytes.Buffer{}
+			_, err = writeMessageLength(header, len(packed))
+			require.NoError(t, err)
+
+			// combine header and message
+			data := append(header.Bytes(), packed...)
+
+			// write the data directly to the connection
+			n, err := c.Write(data)
+
+			require.NoError(t, err)
+			require.Equal(t, len(data), n)
+		}
+
+		// Ensure all handlers have been called (but not finished)
+		require.Eventually(t, func() bool {
+			return activeInboundMessageHandlersCount.Load() == messagesCount
+		}, 1000*time.Millisecond, 20*time.Millisecond, "expected %d handlers to be active", messagesCount)
+
+		// Close the connection.
+		// The custom close handler will open the barrier and then wait for all handlers to finish.
+		require.NoError(t, c.Close())
+
+		// Ensure all handlers have finished
+		require.Equal(t, int32(0), activeInboundMessageHandlersCount.Load())
+	})
 }
 
 func TestClientWithMessageReaderAndWriter(t *testing.T) {

@@ -88,6 +88,9 @@ type Connection struct {
 	// WaitGroup to wait for all Send calls to finish
 	wg sync.WaitGroup
 
+	// WaitGroup to wait for all inbound message handlers to finish
+	inboundMessageHandlersWg sync.WaitGroup
+
 	// to protect following: closing, status
 	mutex sync.Mutex
 
@@ -343,6 +346,14 @@ func (c *Connection) CloseCtx(ctx context.Context) error {
 	return c.close()
 }
 
+// WaitForInboundMessageHandlers blocks until all inbound message handlers are finished.
+//
+// The intended usage of this function is to be called in the OnClose/OnCloseCtx callback
+// to ensure that all inbound message handlers are finished before starting the closing process.
+func (c *Connection) WaitForInboundMessageHandlers() {
+	c.inboundMessageHandlersWg.Wait()
+}
+
 func (c *Connection) Done() <-chan struct{} {
 	return c.done
 }
@@ -438,9 +449,7 @@ func (c *Connection) Send(message *iso8583.Message, options ...Option) (*iso8583
 		defer func() {
 			select {
 			case resp := <-req.replyCh:
-				if c.Opts.InboundMessageHandler != nil {
-					go c.Opts.InboundMessageHandler(c, resp)
-				}
+				c.spawnInboundMessageHandler(resp)
 			default:
 				return
 			}
@@ -737,14 +746,22 @@ func (c *Connection) handleResponse(message *iso8583.Message) {
 		if found {
 			response.replyCh <- message
 		} else if c.Opts.InboundMessageHandler != nil {
-			go c.Opts.InboundMessageHandler(c, message)
+			c.spawnInboundMessageHandler(message)
 		} else {
 			c.handleError(fmt.Errorf("can't find request for ID: %s", reqID))
 		}
 	} else {
-		if c.Opts.InboundMessageHandler != nil {
-			go c.Opts.InboundMessageHandler(c, message)
-		}
+		c.spawnInboundMessageHandler(message)
+	}
+}
+
+func (c *Connection) spawnInboundMessageHandler(message *iso8583.Message) {
+	if c.Opts.InboundMessageHandler != nil {
+		c.inboundMessageHandlersWg.Add(1)
+		go func() {
+			defer c.inboundMessageHandlersWg.Done()
+			c.Opts.InboundMessageHandler(c, message)
+		}()
 	}
 }
 

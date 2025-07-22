@@ -90,21 +90,22 @@ type testServer struct {
 	Server *server.Server
 
 	// to protect following
-	mutex         sync.Mutex
-	receivedPings int
+	mutex                sync.Mutex
+	receivedMessageCount map[string]int
 }
 
-func (t *testServer) Ping() {
-	t.mutex.Lock()
-	t.receivedPings++
-	t.mutex.Unlock()
-}
-
-func (t *testServer) ReceivedPings() int {
+func (t *testServer) incrementReceivedMessageCount(messageType string) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
-	return t.receivedPings
+	t.receivedMessageCount[messageType]++
+}
+
+func (t *testServer) ReceivedMessageCount(messageType string) int {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	return t.receivedMessageCount[messageType]
 }
 
 const (
@@ -148,6 +149,9 @@ func NewTestServerWithAddr(addr string) (*testServer, error) {
 				return
 			}
 
+			// Keep track of the number of messages received for each test case
+			srv.incrementReceivedMessageCount(code)
+
 			switch code {
 			case TestCaseDelayedResponse:
 				// testing value to "sleep" for a 500ms
@@ -170,7 +174,6 @@ func NewTestServerWithAddr(addr string) (*testServer, error) {
 				c.Reply(message)
 			case TestCasePingCounter:
 				// ping request received
-				srv.Ping()
 				c.Reply(message)
 			case TestCaseCloseConnection:
 				// reply
@@ -203,8 +206,9 @@ func NewTestServerWithAddr(addr string) (*testServer, error) {
 	}
 
 	srv = &testServer{
-		Server: s,
-		Addr:   s.Addr,
+		Server:               s,
+		Addr:                 s.Addr,
+		receivedMessageCount: make(map[string]int),
 	}
 
 	return srv, nil

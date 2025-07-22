@@ -812,11 +812,11 @@ func TestClient_Send(t *testing.T) {
 
 		// we expect that ping interval in 50ms has not passed yet
 		// and server has not being pinged
-		require.Equal(t, 0, server.ReceivedPings())
+		require.Equal(t, 0, server.ReceivedMessageCount(TestCasePingCounter))
 
 		time.Sleep(200 * time.Millisecond)
 
-		require.True(t, server.ReceivedPings() > 0)
+		require.True(t, server.ReceivedMessageCount(TestCasePingCounter) > 0)
 	})
 
 	t.Run("it handles unrecognized responses", func(t *testing.T) {
@@ -1065,11 +1065,11 @@ func TestClient_Send(t *testing.T) {
 		defer c.Close()
 
 		// less than 50 ms timeout, should not have any pings
-		require.Equal(t, 0, server.ReceivedPings())
+		require.Equal(t, 0, server.ReceivedMessageCount(TestCasePingCounter))
 
 		// time elapsed is greater than timeout, expect one ping
 		require.Eventually(t, func() bool {
-			return server.ReceivedPings() > 0
+			return server.ReceivedMessageCount(TestCasePingCounter) > 0
 		}, 200*time.Millisecond, 50*time.Millisecond, "no ping messages were sent after read timeout")
 	})
 }
@@ -1295,6 +1295,9 @@ func TestClient_Options(t *testing.T) {
 
 		// Ensure all handlers have finished
 		require.Equal(t, int32(0), activeInboundMessageHandlersCount.Load())
+
+		// Ensure the server received all the messages
+		require.Equal(t, 2*messagesCount, server.ReceivedMessageCount(TestCaseReply))
 	})
 
 	t.Run("WaitForInboundMessageHandlers can be interrupted", func(t *testing.T) {

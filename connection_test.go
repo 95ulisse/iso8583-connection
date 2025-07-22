@@ -1215,7 +1215,7 @@ func TestClient_Options(t *testing.T) {
 		onClose := func(c *connection.Connection) error {
 			// Allow all handlers to continue and wait for them to finish
 			close(inboundMessageHandlersBarrier)
-			c.WaitForInboundMessageHandlers()
+			require.NoError(t, c.WaitForInboundMessageHandlers(context.Background()))
 
 			return nil
 		}
@@ -1295,6 +1295,68 @@ func TestClient_Options(t *testing.T) {
 
 		// Ensure all handlers have finished
 		require.Equal(t, int32(0), activeInboundMessageHandlersCount.Load())
+	})
+
+	t.Run("WaitForInboundMessageHandlers can be interrupted", func(t *testing.T) {
+		inboundMessageHandlerCalled := &atomic.Bool{}
+
+		server, err := NewTestServer()
+		require.NoError(t, err)
+		defer server.Close()
+
+		onInboundMessage := func(c *connection.Connection, m *iso8583.Message) {
+			inboundMessageHandlerCalled.Store(true)
+
+			// This waits forever
+			select {}
+		}
+
+		c, err := connection.New(server.Addr, testSpec, readMessageLength, writeMessageLength,
+			connection.SendTimeout(500*time.Millisecond),
+			connection.InboundMessageHandler(onInboundMessage),
+		)
+		require.NoError(t, err)
+
+		err = c.Connect()
+		require.NoError(t, err)
+		defer c.Close()
+
+		// Write a message to the server without using Send, so that the reply will be handled by the InboundMessageHandler
+		message := iso8583.NewMessage(testSpec)
+		err = message.Marshal(baseFields{
+			MTI:          field.NewStringValue("0800"),
+			TestCaseCode: field.NewStringValue(TestCaseReply),
+			STAN:         field.NewStringValue(getSTAN()),
+		})
+		require.NoError(t, err)
+
+		packed, err := message.Pack()
+		require.NoError(t, err)
+
+		// prepare header
+		header := &bytes.Buffer{}
+		_, err = writeMessageLength(header, len(packed))
+		require.NoError(t, err)
+
+		// combine header and message
+		data := append(header.Bytes(), packed...)
+
+		// write the data directly to the connection
+		n, err := c.Write(data)
+
+		require.NoError(t, err)
+		require.Equal(t, len(data), n)
+
+		// Wait for the inbound message handler to be called
+		require.Eventually(t, func() bool {
+			return inboundMessageHandlerCalled.Load()
+		}, 1000*time.Millisecond, 20*time.Millisecond, "inbound message handler was never called")
+
+		// Wait for termination using a timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		require.ErrorIs(t, c.WaitForInboundMessageHandlers(ctx), context.DeadlineExceeded)
 	})
 }
 

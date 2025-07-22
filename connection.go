@@ -350,8 +350,21 @@ func (c *Connection) CloseCtx(ctx context.Context) error {
 //
 // The intended usage of this function is to be called in the OnClose/OnCloseCtx callback
 // to ensure that all inbound message handlers are finished before starting the closing process.
-func (c *Connection) WaitForInboundMessageHandlers() {
-	c.inboundMessageHandlersWg.Wait()
+//
+// If the context is done, the function returns immediately with the context error.
+func (c *Connection) WaitForInboundMessageHandlers(ctx context.Context) error {
+	ch := make(chan struct{})
+	go func() {
+		c.inboundMessageHandlersWg.Wait()
+		close(ch)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ch:
+		return nil
+	}
 }
 
 func (c *Connection) Done() <-chan struct{} {
